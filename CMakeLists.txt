@@ -12,10 +12,19 @@ cmake_minimum_required (VERSION 3.16)
 
 project (RESVG4JUCE VERSION 0.2.0)
 
+# Determine cargo profile based on build type
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CARGO_PROFILE "debug")
+    set(CARGO_BUILD_FLAG "")
+else()
+    set(CARGO_PROFILE "release")
+    set(CARGO_BUILD_FLAG "--release")
+endif()
+
 # Some CMake exporters (e.g. ninja) need a dummy library file to be present before the 
 # build target referencing this file and triggering the prior build has been executed.
 # Therefore we create a dummy library output file here first
-set (RESVG_LIB_OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/Ext/resvg/target/release)
+set (RESVG_LIB_OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/Ext/resvg/target/${CARGO_PROFILE})
 
 if (WIN32)
     set (RESVG_LIB_OUTPUT ${RESVG_LIB_OUTPUT_DIR}/resvg.lib)
@@ -32,21 +41,21 @@ file (TOUCH ${RESVG_LIB_OUTPUT})
 if (APPLE)
     add_custom_target (resvg_cargo_build_arm64
             WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/Ext/resvg/c-api
-            COMMAND ${CMAKE_COMMAND} -E env MACOSX_DEPLOYMENT_TARGET=10.7 cargo build --release --target aarch64-apple-darwin)
+            COMMAND ${CMAKE_COMMAND} -E env MACOSX_DEPLOYMENT_TARGET=10.7 cargo build ${CARGO_BUILD_FLAG} --target aarch64-apple-darwin)
 
     add_custom_target (resvg_cargo_build_x86_64
             WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/Ext/resvg/c-api
-            COMMAND ${CMAKE_COMMAND} -E env MACOSX_DEPLOYMENT_TARGET=10.7 cargo build --release --target x86_64-apple-darwin)
+            COMMAND ${CMAKE_COMMAND} -E env MACOSX_DEPLOYMENT_TARGET=10.7 cargo build ${CARGO_BUILD_FLAG} --target x86_64-apple-darwin)
 
     add_custom_target (resvg_cargo_build
             WORKING_DIRECTORY ${RESVG_LIB_OUTPUT_DIR}
-            COMMAND lipo -create -output libresvg.a ../aarch64-apple-darwin/release/libresvg.a ../x86_64-apple-darwin/release/libresvg.a)
+            COMMAND lipo -create -output libresvg.a ../aarch64-apple-darwin/${CARGO_PROFILE}/libresvg.a ../x86_64-apple-darwin/${CARGO_PROFILE}/libresvg.a)
 
     add_dependencies (resvg_cargo_build resvg_cargo_build_arm64 resvg_cargo_build_x86_64)
 else()
      add_custom_target (resvg_cargo_build
             WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/Ext/resvg/c-api
-            COMMAND cargo build --release)
+            COMMAND cargo build ${CARGO_BUILD_FLAG})
 endif()
 
 # Make an imported targe that references the library just built
