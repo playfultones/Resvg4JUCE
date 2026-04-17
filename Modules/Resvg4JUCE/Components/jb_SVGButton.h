@@ -51,21 +51,18 @@ private:
         auto componentScale = getApproximateScaleFactorForComponent (this);
 
         double displayScale = 1.0;
-        if (auto* peer = getPeer())
-        {
-            displayScale = peer->getPlatformScaleFactor();
-        }
-        else if (isShowing())
-        {
-            auto screenPoint = localPointToGlobal (getLocalBounds().getCentre());
-            if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (screenPoint))
-                displayScale = display->scale;
-        }
-        else
         {
             auto& displays = juce::Desktop::getInstance().getDisplays();
-            if (auto* primary = displays.getPrimaryDisplay())
-                displayScale = primary->scale;
+            const juce::Displays::Display* display = nullptr;
+
+            if (auto* topLevel = getTopLevelComponent())
+                display = displays.getDisplayForRect (topLevel->getScreenBounds());
+
+            if (display == nullptr)
+                display = displays.getPrimaryDisplay();
+
+            if (display != nullptr)
+                displayScale = display->scale;
         }
 
         auto scaleFactor = (float) (displayScale * componentScale);

@@ -94,27 +94,23 @@ namespace jb
 
             auto componentScale = getApproximateScaleFactorForComponent (this);
 
-            // Use the display scale for the screen this component is actually on.
-            // getPeer() is the most reliable source when available (component is
-            // in a window). Fall back to display lookup with screen coordinates,
-            // and finally default to the primary display scale.
+            // Determine the display's native backing scale (e.g. 2.0 on Retina).
+            // Note: getPeer()->getPlatformScaleFactor() returns 1.0 on macOS because
+            // JUCE handles Retina internally via the graphics context transform.
+            // We must query the display directly to get the real physical DPI scale.
             double displayScale = 1.0;
-            if (auto* peer = getPeer())
             {
-                displayScale = peer->getPlatformScaleFactor();
-            }
-            else if (isShowing())
-            {
-                auto screenPoint = localPointToGlobal (getLocalBounds().getCentre());
-                if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (screenPoint))
-                    displayScale = display->scale;
-            }
-            else
-            {
-                // Not yet on screen — use primary display scale as best guess
                 auto& displays = juce::Desktop::getInstance().getDisplays();
-                if (auto* primary = displays.getPrimaryDisplay())
-                    displayScale = primary->scale;
+                const juce::Displays::Display* display = nullptr;
+
+                if (auto* topLevel = getTopLevelComponent())
+                    display = displays.getDisplayForRect (topLevel->getScreenBounds());
+
+                if (display == nullptr)
+                    display = displays.getPrimaryDisplay();
+
+                if (display != nullptr)
+                    displayScale = display->scale;
             }
 
             auto scaleFactor = (float) (displayScale * componentScale);
