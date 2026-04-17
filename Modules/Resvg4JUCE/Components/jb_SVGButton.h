@@ -29,18 +29,7 @@ public:
 
     void resized() override
     {
-        auto displayScale = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (getBounds().getCentre())->scale;
-        auto componentScale = getApproximateScaleFactorForComponent (this);
-
-        auto newImageBounds = getLocalBounds().toFloat() * displayScale * componentScale;
-
-        if (newImageBounds == cachedImageBounds)
-            return;
-
-        offImage = offSVG.render (newImageBounds, backgroundColour);
-        onImage  = onSVG.render  (newImageBounds, backgroundColour);
-
-        cachedImageBounds = newImageBounds;
+        renderIfNeeded();
     }
 
 private:
@@ -54,8 +43,35 @@ private:
 
     juce::Rectangle<float> cachedImageBounds;
 
+    void renderIfNeeded()
+    {
+        if (getWidth() <= 0 || getHeight() <= 0)
+            return;
+
+        auto componentScale = getApproximateScaleFactorForComponent (this);
+
+        double displayScale = 1.0;
+        if (auto* peer = getPeer())
+            displayScale = peer->getPlatformScaleFactor();
+        else if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (
+                     localPointToGlobal (getLocalBounds().getCentre())))
+            displayScale = display->scale;
+
+        auto newImageBounds = getLocalBounds().toFloat() * (float) (displayScale * componentScale);
+
+        if (newImageBounds == cachedImageBounds)
+            return;
+
+        offImage = offSVG.render (newImageBounds, backgroundColour);
+        onImage  = onSVG.render  (newImageBounds, backgroundColour);
+
+        cachedImageBounds = newImageBounds;
+    }
+
     void paintButton (juce::Graphics& g, bool, bool) override
     {
+        renderIfNeeded();
+
         auto& imageToDraw = getToggleState() ? onImage : offImage;
 
         g.drawImage (imageToDraw, getLocalBounds().toFloat(), juce::RectanglePlacement::centred);

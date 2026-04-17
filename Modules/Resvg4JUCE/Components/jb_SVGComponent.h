@@ -72,10 +72,37 @@ namespace jb
 
         void resized() override
         {
-            auto displayScale = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (getBounds().getCentre())->scale;
+            renderIfNeeded();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            // Re-render if the effective scale changed since last render
+            // (e.g. the parent's AffineTransform changed without triggering resized)
+            renderIfNeeded();
+
+            g.drawImage (cachedImage, getLocalBounds().toFloat(), imagePlacement);
+        }
+
+    private:
+        SVGComponent() {}
+
+        void renderIfNeeded()
+        {
+            if (getWidth() <= 0 || getHeight() <= 0)
+                return;
+
             auto componentScale = getApproximateScaleFactorForComponent (this);
 
-            auto newImageBounds = getLocalBounds().toFloat() * displayScale * componentScale;
+            // Use the display scale for the screen this component is actually on
+            double displayScale = 1.0;
+            if (auto* peer = getPeer())
+                displayScale = peer->getPlatformScaleFactor();
+            else if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (
+                         localPointToGlobal (getLocalBounds().getCentre())))
+                displayScale = display->scale;
+
+            auto newImageBounds = getLocalBounds().toFloat() * (float) (displayScale * componentScale);
 
             if (newImageBounds == cachedImageBounds)
                 return;
@@ -104,14 +131,6 @@ namespace jb
             cachedImage = svg.render (newImageBounds);
             cachedImageBounds = newImageBounds;
         }
-
-        void paint (juce::Graphics& g) override
-        {
-            g.drawImage (cachedImage, getLocalBounds().toFloat(), imagePlacement);
-        }
-
-    private:
-        SVGComponent() {}
 
         /** Hash the actual SVG content bytes — deterministic regardless of memory layout. */
         static int64_t computeContentHash (const char* data, int size)
