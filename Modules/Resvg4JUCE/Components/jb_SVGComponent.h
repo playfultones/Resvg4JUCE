@@ -94,13 +94,28 @@ namespace jb
 
             auto componentScale = getApproximateScaleFactorForComponent (this);
 
-            // Use the display scale for the screen this component is actually on
+            // Use the display scale for the screen this component is actually on.
+            // getPeer() is the most reliable source when available (component is
+            // in a window). Fall back to display lookup with screen coordinates,
+            // and finally default to the primary display scale.
             double displayScale = 1.0;
             if (auto* peer = getPeer())
+            {
                 displayScale = peer->getPlatformScaleFactor();
-            else if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (
-                         localPointToGlobal (getLocalBounds().getCentre())))
-                displayScale = display->scale;
+            }
+            else if (isShowing())
+            {
+                auto screenPoint = localPointToGlobal (getLocalBounds().getCentre());
+                if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (screenPoint))
+                    displayScale = display->scale;
+            }
+            else
+            {
+                // Not yet on screen — use primary display scale as best guess
+                auto& displays = juce::Desktop::getInstance().getDisplays();
+                if (auto* primary = displays.getPrimaryDisplay())
+                    displayScale = primary->scale;
+            }
 
             auto newImageBounds = getLocalBounds().toFloat() * (float) (displayScale * componentScale);
 
