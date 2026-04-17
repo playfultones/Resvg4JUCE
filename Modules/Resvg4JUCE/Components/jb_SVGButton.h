@@ -68,7 +68,11 @@ private:
                 displayScale = primary->scale;
         }
 
-        auto newImageBounds = getLocalBounds().toFloat() * (float) (displayScale * componentScale);
+        auto scaleFactor = (float) (displayScale * componentScale);
+        auto newImageBounds = getLocalBounds().toFloat() * scaleFactor;
+
+        if (newImageBounds.getWidth() < 1.0f || newImageBounds.getHeight() < 1.0f)
+            return;
 
         if (newImageBounds == cachedImageBounds)
             return;

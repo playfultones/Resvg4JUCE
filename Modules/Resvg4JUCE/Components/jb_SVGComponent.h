@@ -117,7 +117,13 @@ namespace jb
                     displayScale = primary->scale;
             }
 
-            auto newImageBounds = getLocalBounds().toFloat() * (float) (displayScale * componentScale);
+            auto scaleFactor = (float) (displayScale * componentScale);
+            auto newImageBounds = getLocalBounds().toFloat() * scaleFactor;
+
+            // resvg panics if the fit dimension is < 1.0 — skip rendering for
+            // sub-pixel components (can happen at very small plugin scale factors)
+            if (newImageBounds.getWidth() < 1.0f || newImageBounds.getHeight() < 1.0f)
+                return;
 
             if (newImageBounds == cachedImageBounds)
                 return;
