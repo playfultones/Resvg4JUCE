@@ -70,21 +70,30 @@ namespace jb
             contentHash = computeContentHash (data, size);
         }
 
+        /** Supersample factor over physical pixels. With the parent component
+         *  applying a scale transform (e.g. mainComponent.setTransform(scale(uiSize))),
+         *  we want the SVG bitmap to have enough source detail that the inevitable
+         *  downsample to physical pixels stays crisp. 2x is a sweet spot — costs
+         *  4x bitmap memory per icon (icons are small) and gives Lanczos / bilinear
+         *  enough headroom to avoid the muddy look of sampling near-identity ratios. */
+        static constexpr float supersample = 2.0f;
+
         void resized() override
         {
             auto displayScale = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (getScreenBounds().getCentre())->scale;
             auto componentScale = getApproximateScaleFactorForComponent (this);
             auto totalScale = static_cast<float> (displayScale) * componentScale;
+            auto renderScale = totalScale * supersample;
 
-            auto newImageBounds = getLocalBounds().toFloat() * totalScale;
+            auto newImageBounds = getLocalBounds().toFloat() * renderScale;
 
-            if (newImageBounds == cachedImageBounds && totalScale == cachedTotalScale)
+            if (newImageBounds == cachedImageBounds && renderScale == cachedRenderScale)
                 return;
 
             auto pixelW = (int) std::ceil (newImageBounds.getWidth());
             auto pixelH = (int) std::ceil (newImageBounds.getHeight());
 
-            cachedTotalScale = totalScale;
+            cachedRenderScale = renderScale;
 
             if (contentHash != 0 && pixelW > 0 && pixelH > 0)
             {
@@ -110,25 +119,26 @@ namespace jb
 
         void paint (juce::Graphics& g) override
         {
-            if (! cachedImage.isValid() || cachedTotalScale <= 0.0f)
+            if (! cachedImage.isValid() || cachedRenderScale <= 0.0f)
                 return;
 
-            // The image was rasterised at physical pixel resolution.
-            // Drawing it with drawImage(img, localBounds) makes JUCE bilinearly resample to
-            // logical bounds first, then the parent transform downsamples again — two-stage
-            // filtering gives a soft result. By drawing with an explicit inverse-scale
-            // transform we guarantee image pixels map 1:1 to physical pixels (the inverse
-            // scale and the parent's scale compose to identity).
+            // Image is at supersample × physical resolution. Draw it with an explicit
+            // transform so its pixels map cleanly onto physical pixels through the
+            // parent component's scale — the composed transform is exactly
+            // `1/supersample`, which is a clean high-ratio downsample (single bilinear
+            // pass at 0.5 ratio) instead of two near-identity passes.
+            g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+
             const auto imgW = (float) cachedImage.getWidth();
             const auto imgH = (float) cachedImage.getHeight();
 
-            const juce::Rectangle<float> imgInLogical (imgW / cachedTotalScale,
-                                                       imgH / cachedTotalScale);
-            const auto placedLogical = imagePlacement.appliedTo (imgInLogical, getLocalBounds().toFloat());
+            const juce::Rectangle<float> imgInLocal (imgW / cachedRenderScale,
+                                                     imgH / cachedRenderScale);
+            const auto placedLocal = imagePlacement.appliedTo (imgInLocal, getLocalBounds().toFloat());
 
-            const auto t = juce::AffineTransform::scale (placedLogical.getWidth() / imgW,
-                                                          placedLogical.getHeight() / imgH)
-                               .translated (placedLogical.getX(), placedLogical.getY());
+            const auto t = juce::AffineTransform::scale (placedLocal.getWidth() / imgW,
+                                                          placedLocal.getHeight() / imgH)
+                               .translated (placedLocal.getX(), placedLocal.getY());
 
             g.drawImageTransformed (cachedImage, t);
         }
@@ -164,7 +174,7 @@ namespace jb
 
         juce::Image cachedImage;
         juce::Rectangle<float> cachedImageBounds;
-        float cachedTotalScale = 0.0f;
+        float cachedRenderScale = 0.0f;
 
         juce::RectanglePlacement imagePlacement = juce::RectanglePlacement::centred;
     };
