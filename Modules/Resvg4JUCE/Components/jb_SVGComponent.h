@@ -72,16 +72,19 @@ namespace jb
 
         void resized() override
         {
-            auto displayScale = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (getBounds().getCentre())->scale;
+            auto displayScale = juce::Desktop::getInstance().getDisplays().getDisplayForPoint (getScreenBounds().getCentre())->scale;
             auto componentScale = getApproximateScaleFactorForComponent (this);
+            auto totalScale = static_cast<float> (displayScale) * componentScale;
 
-            auto newImageBounds = getLocalBounds().toFloat() * displayScale * componentScale;
+            auto newImageBounds = getLocalBounds().toFloat() * totalScale;
 
-            if (newImageBounds == cachedImageBounds)
+            if (newImageBounds == cachedImageBounds && totalScale == cachedTotalScale)
                 return;
 
             auto pixelW = (int) std::ceil (newImageBounds.getWidth());
             auto pixelH = (int) std::ceil (newImageBounds.getHeight());
+
+            cachedTotalScale = totalScale;
 
             if (contentHash != 0 && pixelW > 0 && pixelH > 0)
             {
@@ -107,7 +110,27 @@ namespace jb
 
         void paint (juce::Graphics& g) override
         {
-            g.drawImage (cachedImage, getLocalBounds().toFloat(), imagePlacement);
+            if (! cachedImage.isValid() || cachedTotalScale <= 0.0f)
+                return;
+
+            // The image was rasterised at physical pixel resolution.
+            // Drawing it with drawImage(img, localBounds) makes JUCE bilinearly resample to
+            // logical bounds first, then the parent transform downsamples again — two-stage
+            // filtering gives a soft result. By drawing with an explicit inverse-scale
+            // transform we guarantee image pixels map 1:1 to physical pixels (the inverse
+            // scale and the parent's scale compose to identity).
+            const auto imgW = (float) cachedImage.getWidth();
+            const auto imgH = (float) cachedImage.getHeight();
+
+            const juce::Rectangle<float> imgInLogical (imgW / cachedTotalScale,
+                                                       imgH / cachedTotalScale);
+            const auto placedLogical = imagePlacement.appliedTo (imgInLogical, getLocalBounds().toFloat());
+
+            const auto t = juce::AffineTransform::scale (placedLogical.getWidth() / imgW,
+                                                          placedLogical.getHeight() / imgH)
+                               .translated (placedLogical.getX(), placedLogical.getY());
+
+            g.drawImageTransformed (cachedImage, t);
         }
 
     private:
@@ -141,6 +164,7 @@ namespace jb
 
         juce::Image cachedImage;
         juce::Rectangle<float> cachedImageBounds;
+        float cachedTotalScale = 0.0f;
 
         juce::RectanglePlacement imagePlacement = juce::RectanglePlacement::centred;
     };
