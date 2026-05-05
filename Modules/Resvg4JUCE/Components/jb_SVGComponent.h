@@ -17,16 +17,9 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/.
 namespace jb
 {
 
-    /** Process-wide thread pool shared by every SVG component (single- and
-     *  multi-frame) for asynchronous high-resolution rasterisation. Sized to
-     *  half the logical CPU count (min 2) so SVG rasterisation parallelises
-     *  but doesn't oversubscribe alongside other audio/UI work.
-     *
-     *  Implemented as a Meyers singleton with the same lifetime as the host
-     *  process so that closing and re-opening an editor never waits on
-     *  `juce::ThreadPool::removeAllJobs`. Stale jobs from a closed editor
-     *  finish their render, post a callAsync that finds a null WeakReference,
-     *  and discard their result. */
+    /** Shared thread pool for asynchronous SVG rasterisation. Process-wide
+     *  Meyers singleton so editor open/close cycles don't wait on
+     *  `juce::ThreadPool::removeAllJobs`. */
     inline juce::ThreadPool& getResvgRenderPool()
     {
         static juce::ThreadPool pool { juce::ThreadPoolOptions {}
@@ -56,21 +49,9 @@ namespace jb
     }
 
     /** Per-tree render state shared between an SVGComponent and its in-flight
-     *  background jobs.
-     *
-     *  Holding the tree, the cancellation generation counter, and a render
-     *  mutex inside a shared_ptr eliminates two classes of bug:
-     *
-     *   1. The owning component can be destroyed while a background job is
-     *      mid-render. The shared_ptr keeps the tree alive until the worker
-     *      finishes; the worker reads `generation` directly without ever
-     *      dereferencing the (possibly destructed) component.
-     *
-     *   2. The component's resized() may render a low-resolution placeholder
-     *      synchronously while a previous job is still rendering high-res on
-     *      a worker thread. The mutex serialises every call into
-     *      `Resvg::RenderTree::render`, regardless of which version of the
-     *      underlying resvg-c library is linked in. */
+     *  background jobs via shared_ptr — keeps the tree alive across component
+     *  destruction, and serialises render calls between the message thread
+     *  and worker pool. */
     struct AsyncSvgRenderState
     {
         Resvg::RenderTree tree;
@@ -82,18 +63,15 @@ namespace jb
     };
 
     /**
- * A component that owns an Resvg::RenderTree. On each resize, it renders an Image according to the Components size
- * and displays it according to the placement set through setImagePlacement (default is centred)
+ * A component that owns an Resvg::RenderTree. On each resize, it renders an Image
+ * according to the Components size and displays it according to the placement set
+ * through setImagePlacement (default is centred).
  *
- * Rendering happens in two phases. First, a low-resolution image (at the parent's
- * physical scale, no supersampling) is rasterised synchronously so the component
- * has something to draw immediately — the cost matches the pre-supersample
- * baseline. Then a high-resolution supersampled image is rendered on a shared
- * background thread pool and swapped in for sharper output once it is ready.
- *
- * If subsequent resizes invalidate an in-flight job, the stale result is dropped
- * via a generation counter; if a hi-res image for the requested pixel dimensions
- * is already in juce::ImageCache, it is used directly without dispatching a job.
+ * Rendering is two-phase: a low-resolution placeholder is rasterised synchronously
+ * (skipped if a worker is already mid-render), then a supersampled image is
+ * rendered on a shared background thread pool and swapped in once ready. Stale
+ * results from superseded resizes are dropped via a generation counter; cached
+ * images for matching pixel dimensions are reused via juce::ImageCache.
  */
     class SVGComponent : public juce::Component
     {
@@ -165,13 +143,33 @@ namespace jb
             contentHash = computeSvgContentHash (data, size);
         }
 
-        /** Supersample factor over physical pixels. With the parent component
-         *  applying a scale transform (e.g. mainComponent.setTransform(scale(uiSize))),
-         *  we want the SVG bitmap to have enough source detail that the inevitable
-         *  downsample to physical pixels stays crisp. 2x is a sweet spot — costs
-         *  4x bitmap memory per icon (icons are small) and gives Lanczos / bilinear
-         *  enough headroom to avoid the muddy look of sampling near-identity ratios. */
-        static constexpr float supersample = 2.0f;
+        /** Default supersample factor over physical pixels. */
+        static constexpr float defaultSupersample = 2.0f;
+
+        /** Override the supersample factor for this instance. Larger values
+         *  trade quadratically more bitmap memory for sharper output. */
+        void setSupersampleFactor (float newFactor)
+        {
+            jassert (newFactor > 0.0f);
+            if (juce::approximatelyEqual (newFactor, supersample))
+                return;
+
+            supersample = newFactor;
+
+            if (state != nullptr)
+                state->generation.fetch_add (1, std::memory_order_relaxed);
+
+            cachedImage = juce::Image();
+            cachedRenderScale = 0.0f;
+            cachedImageBounds = {};
+
+            if (! getLocalBounds().isEmpty())
+                resized();
+
+            repaint();
+        }
+
+        float getSupersampleFactor() const noexcept { return supersample; }
 
         void resized() override
         {
@@ -191,17 +189,14 @@ namespace jb
             const int hiW = (int) std::ceil (highResBounds.getWidth());
             const int hiH = (int) std::ceil (highResBounds.getHeight());
 
-            // Already at the target high-res for this size? Nothing to do.
             if (cachedImage.isValid()
                 && juce::approximatelyEqual (cachedRenderScale, highResScale)
                 && cachedImage.getWidth()  == hiW
                 && cachedImage.getHeight() == hiH)
                 return;
 
-            // Any previously scheduled high-res job is now stale.
             const int myGen = state->generation.fetch_add (1, std::memory_order_relaxed) + 1;
 
-            // Fast path: high-res already in the shared cache (e.g. another instance rendered it).
             if (contentHash != 0 && hiW > 0 && hiH > 0)
             {
                 const auto hashCode = makeSvgImageCacheKey (contentHash, hiW, hiH);
@@ -214,12 +209,9 @@ namespace jb
                 }
             }
 
-            // Try to produce a low-res placeholder synchronously so the component
-            // paints something immediately. We never block the message thread on
-            // an in-flight worker — if the cache misses and the render mutex is
-            // contended we skip the placeholder and rely on the async high-res
-            // path below to land first; the component paints whatever it had
-            // (or nothing) until then.
+            // Synchronous low-res placeholder — try_lock so we never block the
+            // message thread on an in-flight worker. If contended, the async
+            // high-res path below covers it.
             const int loW = (int) std::ceil (lowResBounds.getWidth());
             const int loH = (int) std::ceil (lowResBounds.getHeight());
 
@@ -250,7 +242,6 @@ namespace jb
                 }
             }
 
-            // Schedule the high-res render in the background.
             if (hiW > 0 && hiH > 0)
             {
                 const int64_t hiHashCode = (contentHash != 0) ? makeSvgImageCacheKey (contentHash, hiW, hiH) : 0;
@@ -269,11 +260,6 @@ namespace jb
             if (! cachedImage.isValid() || cachedRenderScale <= 0.0f)
                 return;
 
-            // Image is at supersample × physical resolution. Draw it with an explicit
-            // transform so its pixels map cleanly onto physical pixels through the
-            // parent component's scale — the composed transform is exactly
-            // `1/supersample`, which is a clean high-ratio downsample (single bilinear
-            // pass at 0.5 ratio) instead of two near-identity passes.
             g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
 
             const auto imgW = (float) cachedImage.getWidth();
@@ -302,14 +288,7 @@ namespace jb
             repaint();
         }
 
-        /** Background job that rasterises the SVG at the supersampled resolution.
-         *
-         *  The job holds a shared_ptr to the AsyncSvgRenderState so that the tree
-         *  and its render mutex outlive the owning component if necessary. It
-         *  never reads any field of *this from the worker thread — the
-         *  cancellation check goes through `state->generation`. The juce::Image
-         *  is published back on the message thread via callAsync, which is the
-         *  only place the WeakReference<SVGComponent> is dereferenced. */
+        /** Background job that rasterises the SVG at the supersampled resolution. */
         class HighResRenderJob : public juce::ThreadPoolJob
         {
         public:
@@ -334,8 +313,6 @@ namespace jb
                 if (shouldExit() || state == nullptr)
                     return jobHasFinished;
 
-                // Cancellation check: have we been superseded by a newer schedule
-                // (or by component destruction, which also bumps the counter)?
                 if (state->generation.load (std::memory_order_relaxed) != gen)
                     return jobHasFinished;
 
@@ -347,9 +324,6 @@ namespace jb
                 {
                     std::lock_guard<std::mutex> lock (state->renderMutex);
 
-                    // Re-check after acquiring the lock — the synchronous render
-                    // path on the message thread may have produced a result while
-                    // we were queued, or the component may have gone away.
                     if (state->generation.load (std::memory_order_relaxed) != gen)
                         return jobHasFinished;
 
@@ -374,9 +348,6 @@ namespace jb
                 auto boundsCopy = bounds;
                 juce::MessageManager::callAsync ([weakCopy, genCopy, stateCopy, rendered = std::move (rendered), boundsCopy, scaleCopy]() mutable
                 {
-                    // The publish step runs on the message thread, which is also
-                    // the thread that destructs the SVGComponent. weak.get() and
-                    // any subsequent member access are therefore race-free.
                     if (auto* owner = weakCopy.get())
                         if (stateCopy->generation.load (std::memory_order_relaxed) == genCopy)
                             owner->publishHighRes (std::move (rendered), scaleCopy, boundsCopy);
@@ -395,6 +366,8 @@ namespace jb
         };
 
         std::shared_ptr<AsyncSvgRenderState> state;
+
+        float supersample = defaultSupersample;
 
         int64_t contentHash = 0;
 
